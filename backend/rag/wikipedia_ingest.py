@@ -17,6 +17,8 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
+import ollama as _ollama
+
 from .chroma_store import (
     DEFAULT_CHUNK_OVERLAP,
     DEFAULT_CHUNK_SIZE,
@@ -29,13 +31,33 @@ from .entities import PEOPLE, PLACES
 
 logger = logging.getLogger(__name__)
 
-OLLAMA_BASE = "http://localhost:11434"
 EMBED_MODEL = "nomic-embed-text"
 
 
 # ---------------------------------------------------------------------------
 # Wikipedia fetching — tries full extract first, summary as fallback
 # ---------------------------------------------------------------------------
+
+MAX_RETRIES = 4
+RETRY_BACKOFF = [2, 5, 10, 20]
+
+
+def _request_with_retry(url: str, timeout: int = 20) -> bytes:
+    """GET *url* with automatic retry + exponential backoff on 429."""
+    req = urllib.request.Request(url, headers={"User-Agent": "RAG-HW3-Bot/1.0"})
+    for attempt in range(MAX_RETRIES):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read()
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429 and attempt < MAX_RETRIES - 1:
+                wait = RETRY_BACKOFF[attempt]
+                logger.warning("429 rate-limited on %s — waiting %ds (attempt %d)", url[:80], wait, attempt + 1)
+                time.sleep(wait)
+                continue
+            raise
+    raise RuntimeError(f"Max retries exceeded for {url}")
+
 
 def fetch_wikipedia_text(title: str) -> str:
     """Return the plain-text extract for a Wikipedia article title."""
@@ -49,80 +71,52 @@ def fetch_wikipedia_text(title: str) -> str:
         "format": "json",
     })
     url = f"https://en.wikipedia.org/w/api.php?{params}"
-    req = urllib.request.Request(url, headers={"User-Agent": "RAG-HW3-Bot/1.0"})
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            data = json.loads(resp.read().decode())
-            pages = data.get("query", {}).get("pages", {})
-            for page in pages.values():
-                extract = page.get("extract", "")
-                if extract and len(extract) > 50:
-                    return extract
+        raw = _request_with_retry(url)
+        data = json.loads(raw.decode())
+        pages = data.get("query", {}).get("pages", {})
+        for page in pages.values():
+            extract = page.get("extract", "")
+            if extract and len(extract) > 50:
+                return extract
     except Exception:
         logger.warning("Action API failed for %s, trying summary API", title)
 
     # Fallback: REST summary API
     encoded = urllib.parse.quote(title.replace(" ", "_"))
     url2 = f"https://en.wikipedia.org/api/rest_v1/page/summary/{encoded}"
-    req2 = urllib.request.Request(url2, headers={"User-Agent": "RAG-HW3-Bot/1.0"})
     try:
-        with urllib.request.urlopen(req2, timeout=15) as resp:
-            data = json.loads(resp.read().decode())
-            return data.get("extract", "")
+        raw = _request_with_retry(url2, timeout=15)
+        data = json.loads(raw.decode())
+        return data.get("extract", "")
     except Exception:
         logger.exception("All Wikipedia APIs failed for: %s", title)
     return ""
 
 
 # ---------------------------------------------------------------------------
-# Ollama embedding helper
+# Ollama embedding helper (uses the ``ollama`` Python library)
 # ---------------------------------------------------------------------------
 
 def _check_ollama_available() -> bool:
     """Quick health check for Ollama."""
     try:
-        req = urllib.request.Request(f"{OLLAMA_BASE}/api/tags")
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            return resp.status == 200
+        _ollama.list()
+        return True
     except Exception:
         return False
 
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
-    """Call Ollama /api/embed to get embeddings for a batch of texts.
-    Embeds one at a time if batch fails (some Ollama versions have limits)."""
+    """Embed a list of texts using the Ollama embed endpoint."""
     if not texts:
         return []
-
-    # Try batch first
-    try:
-        return _embed_batch(texts)
-    except Exception:
-        logger.warning("Batch embedding failed, falling back to one-at-a-time")
-
-    # Fallback: embed one at a time
-    results: list[list[float]] = []
-    for text in texts:
-        results.append(_embed_batch([text])[0])
-    return results
-
-
-def _embed_batch(texts: list[str]) -> list[list[float]]:
-    url = f"{OLLAMA_BASE}/api/embed"
-    payload = json.dumps({"model": EMBED_MODEL, "input": texts}).encode()
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        data = json.loads(resp.read().decode())
-    return data["embeddings"]
+    resp = _ollama.embed(model=EMBED_MODEL, input=texts)
+    return resp["embeddings"]
 
 
 def embed_single(text: str) -> list[float]:
-    return _embed_batch([text])[0]
+    return embed_texts([text])[0]
 
 
 # ---------------------------------------------------------------------------
@@ -159,32 +153,60 @@ def ingest_all(
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     overlap: int = DEFAULT_CHUNK_OVERLAP,
 ) -> list[dict[str, Any]]:
-    """Ingest every entity in PEOPLE and PLACES lists."""
+    """Ingest every entity in PEOPLE and PLACES lists.
+
+    Skips entities that already have chunks in ChromaDB so re-running
+    only fills in the gaps (e.g. after a 429 rate-limit failure).
+    """
+    from .chroma_store import entity_chunk_count
+
     if not _check_ollama_available():
         raise RuntimeError(
             "Ollama is not reachable at http://localhost:11434. "
             "Start Ollama and ensure 'nomic-embed-text' is pulled."
         )
 
+    p_col = people_collection()
+    l_col = places_collection()
+
     results: list[dict[str, Any]] = []
     total = len(PEOPLE) + len(PLACES)
+
+    MIN_GOOD_CHUNKS = 3
+
     for i, name in enumerate(PEOPLE, 1):
-        logger.info("[%d/%d] Ingesting person: %s", i, total, name)
+        existing = entity_chunk_count(p_col, name)
+        if existing >= MIN_GOOD_CHUNKS:
+            logger.info("[%d/%d] Skipping %s (already %d chunks)", i, total, name, existing)
+            results.append({"entity": name, "category": "person", "status": "ok", "chunks": existing})
+            continue
+        if existing > 0:
+            logger.info("[%d/%d] Re-ingesting %s (only %d chunks, likely summary-only)", i, total, name, existing)
+        else:
+            logger.info("[%d/%d] Ingesting person: %s", i, total, name)
         try:
             results.append(ingest_entity(name, "person", chunk_size, overlap))
         except Exception as exc:
             logger.exception("Failed %s", name)
             results.append({"entity": name, "category": "person", "status": f"error: {exc}", "chunks": 0})
-        time.sleep(0.1)
+        time.sleep(1.5)
 
     for i, name in enumerate(PLACES, len(PEOPLE) + 1):
-        logger.info("[%d/%d] Ingesting place: %s", i, total, name)
+        existing = entity_chunk_count(l_col, name)
+        if existing >= MIN_GOOD_CHUNKS:
+            logger.info("[%d/%d] Skipping %s (already %d chunks)", i, total, name, existing)
+            results.append({"entity": name, "category": "place", "status": "ok", "chunks": existing})
+            continue
+        if existing > 0:
+            logger.info("[%d/%d] Re-ingesting %s (only %d chunks, likely summary-only)", i, total, name, existing)
+        else:
+            logger.info("[%d/%d] Ingesting place: %s", i, total, name)
         try:
             results.append(ingest_entity(name, "place", chunk_size, overlap))
         except Exception as exc:
             logger.exception("Failed %s", name)
             results.append({"entity": name, "category": "place", "status": f"error: {exc}", "chunks": 0})
-        time.sleep(0.1)
+        time.sleep(1.5)
 
     return results
 
