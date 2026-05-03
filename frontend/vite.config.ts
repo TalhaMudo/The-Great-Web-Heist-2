@@ -11,7 +11,8 @@ export default defineConfig({
       "/metrics": "http://localhost:8000",
       "/jobs": "http://localhost:8000",
       "/settings": "http://localhost:8000",
-      "/embeddings": "http://localhost:8000"
+      "/embeddings": "http://localhost:8000",
+      "/rag": "http://localhost:8000"
     }
   }
 });

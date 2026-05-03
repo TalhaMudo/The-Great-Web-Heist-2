@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from .crawler import crawler_service
 from .indexer import index_service
 from .models import CrawlJob, JobStatus, summarize_jobs
+from .rag.router import rag_router
 from .semantic_index import semantic_index_service
 from .storage import init_db, load_job_events, load_jobs, load_pages
 
@@ -124,7 +125,7 @@ class MetricsResponse(BaseModel):
     jobs_summary: List[Dict[str, object]]
 
 
-app = FastAPI(title="The Great Web Heist 2 - Multi-Agent Crawler")
+app = FastAPI(title="The Great Web Heist")
 
 app.add_middleware(
     CORSMiddleware,
@@ -132,6 +133,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(rag_router)
 
 
 def _build_search_response(raw_results) -> SearchResponse:
@@ -340,7 +343,7 @@ async def metrics() -> MetricsResponse:
 
 @app.get("/")
 async def root() -> Dict[str, str]:
-    return {"message": "The Great Web Heist 2 (multi-agent build) backend is running."}
+    return {"message": "The Great Web Heist backend is running."}
 
 
 @app.on_event("startup")

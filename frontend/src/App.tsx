@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 type JobSummary = {
   id: string;
@@ -94,8 +94,42 @@ type EmbeddingStatus = {
   error_message?: string | null;
 };
 
+type RagChunk = {
+  id: string;
+  document: string;
+  entity?: string | null;
+  search_type?: string | null;
+  distance?: number | null;
+};
+
+type RagToolCall = {
+  name: string;
+  arguments: Record<string, string>;
+};
+
+type RagChatMessage = {
+  role: string;
+  content: string;
+};
+
+type RagChatResponse = {
+  session_id: string;
+  answer: string;
+  tool_calls: RagToolCall[];
+  chunks_retrieved: RagChunk[];
+  history: RagChatMessage[];
+};
+
+type RagStatus = {
+  people_chunks: number;
+  places_chunks: number;
+  total_chunks: number;
+  people_count: number;
+  places_count: number;
+};
+
 export const App: React.FC = () => {
-  const [viewMode, setViewMode] = useState<"crawler" | "search" | "embeddings">("crawler");
+  const [viewMode, setViewMode] = useState<"crawler" | "search" | "embeddings" | "rag">("crawler");
   const [origin, setOrigin] = useState("");
   const [depthInput, setDepthInput] = useState("2");
   const [maxUrlsToVisit, setMaxUrlsToVisit] = useState("500");
@@ -119,6 +153,20 @@ export const App: React.FC = () => {
   const [embeddingRateLimit, setEmbeddingRateLimit] = useState("1.0");
   const [embeddingMaxPages, setEmbeddingMaxPages] = useState("500");
   const [isMutatingEmbeddingJob, setIsMutatingEmbeddingJob] = useState(false);
+
+  // RAG Chat state
+  const [ragSessionId, setRagSessionId] = useState<string | null>(null);
+  const [ragInput, setRagInput] = useState("");
+  const [ragHistory, setRagHistory] = useState<RagChatMessage[]>([]);
+  const [ragChunks, setRagChunks] = useState<RagChunk[]>([]);
+  const [ragToolCalls, setRagToolCalls] = useState<RagToolCall[]>([]);
+  const [ragLoading, setRagLoading] = useState(false);
+  const [ragStatus, setRagStatus] = useState<RagStatus | null>(null);
+  const [ragIngesting, setRagIngesting] = useState(false);
+  const [ragChunkSize, setRagChunkSize] = useState("500");
+  const [ragOverlap, setRagOverlap] = useState("50");
+  const [ragChunksExpanded, setRagChunksExpanded] = useState<Record<number, boolean>>({});
+  const ragChatEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const fetchMetrics = () => {
@@ -365,6 +413,92 @@ export const App: React.FC = () => {
     }
   };
 
+  // RAG status polling
+  useEffect(() => {
+    if (viewMode !== "rag") return;
+    const fetchStatus = () => {
+      fetch("/rag/status")
+        .then((res) => res.json())
+        .then((data: RagStatus) => setRagStatus(data))
+        .catch(() => {});
+    };
+    fetchStatus();
+    const interval = setInterval(fetchStatus, 5000);
+    return () => clearInterval(interval);
+  }, [viewMode]);
+
+  // Auto-scroll chat
+  useEffect(() => {
+    ragChatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [ragHistory]);
+
+  const sendRagMessage = async () => {
+    const msg = ragInput.trim();
+    if (!msg || ragLoading) return;
+    setRagInput("");
+    setRagLoading(true);
+    setError(null);
+    setRagChunks([]);
+    setRagToolCalls([]);
+    setRagChunksExpanded({});
+    try {
+      const res = await fetch("/rag/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: msg, session_id: ragSessionId }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.detail ?? "Chat failed");
+      }
+      const data: RagChatResponse = await res.json();
+      setRagSessionId(data.session_id);
+      setRagHistory(data.history);
+      setRagChunks(data.chunks_retrieved);
+      setRagToolCalls(data.tool_calls);
+    } catch (e: any) {
+      setError(e.message ?? String(e));
+    } finally {
+      setRagLoading(false);
+    }
+  };
+
+  const clearRagChat = async () => {
+    if (ragSessionId) {
+      await fetch(`/rag/chat/clear?session_id=${ragSessionId}`, { method: "POST" }).catch(() => {});
+    }
+    setRagSessionId(null);
+    setRagHistory([]);
+    setRagChunks([]);
+    setRagToolCalls([]);
+    setRagChunksExpanded({});
+  };
+
+  const runRagIngest = async () => {
+    setError(null);
+    setRagIngesting(true);
+    try {
+      const res = await fetch("/rag/ingest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chunk_size: Number(ragChunkSize) || 500,
+          overlap: Number(ragOverlap) || 50,
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.detail ?? "Ingestion failed");
+      }
+      const data = await res.json();
+      alert(`Ingestion complete: ${data.total_ok} entities, ${data.total_chunks} chunks.`);
+    } catch (e: any) {
+      setError(e.message ?? String(e));
+    } finally {
+      setRagIngesting(false);
+    }
+  };
+
   const searchPanel = (
     <section className="panel">
       <div className="search-header">
@@ -570,7 +704,7 @@ export const App: React.FC = () => {
   return (
     <div className="app">
       <header className="header">
-        <h1>The Great Web Heist 2</h1>
+        <h1>The Great Web Heist</h1>
         <p>Multi-agent crawler and search dashboard</p>
         <p className="subtitle">
           Returns assignment-required triples <code>(relevant_url, origin_url, depth)</code> over a depth-limited,
@@ -600,6 +734,14 @@ export const App: React.FC = () => {
             aria-selected={viewMode === "embeddings"}
           >
             Embeddings
+          </button>
+          <button
+            className={`mode-btn ${viewMode === "rag" ? "mode-btn-active" : ""}`}
+            onClick={() => setViewMode("rag")}
+            role="tab"
+            aria-selected={viewMode === "rag"}
+          >
+            Chat (RAG)
           </button>
         </div>
       </header>
@@ -913,6 +1055,147 @@ export const App: React.FC = () => {
 
           {viewMode === "search" && searchPanel}
           {viewMode === "embeddings" && embeddingsPanel}
+
+          {viewMode === "rag" && (
+            <section className="panel rag-panel">
+              <h2>RAG Chat</h2>
+              <p className="search-subtitle">
+                Ask questions about famous people and places. The local Qwen2.5-1.5B model will
+                use MCP tool calls to retrieve relevant chunks from ChromaDB before answering.
+              </p>
+
+              {/* Ingestion & status bar */}
+              <div className="rag-status-bar">
+                <div className="rag-status-info">
+                  <span>People chunks: <strong>{ragStatus?.people_chunks ?? 0}</strong></span>
+                  <span>Places chunks: <strong>{ragStatus?.places_chunks ?? 0}</strong></span>
+                  <span>Total: <strong>{ragStatus?.total_chunks ?? 0}</strong></span>
+                </div>
+                <div className="rag-ingest-controls">
+                  <label>Chunk size
+                    <input type="number" min={100} value={ragChunkSize} onChange={(e) => setRagChunkSize(e.target.value)} style={{ width: 70 }} />
+                  </label>
+                  <label>Overlap
+                    <input type="number" min={0} value={ragOverlap} onChange={(e) => setRagOverlap(e.target.value)} style={{ width: 60 }} />
+                  </label>
+                  <button onClick={runRagIngest} disabled={ragIngesting}>
+                    {ragIngesting ? "Ingesting..." : "Ingest Wikipedia"}
+                  </button>
+                </div>
+              </div>
+
+              {/* Chat messages */}
+              <div className="rag-chat-container">
+                <div className="rag-chat-messages">
+                  {ragHistory.length === 0 && (
+                    <p className="hint" style={{ textAlign: "center", marginTop: 40 }}>
+                      Start a conversation. Try: "Who was Nikola Tesla?" or "What is the Colosseum?"
+                    </p>
+                  )}
+                  {ragHistory.map((msg, idx) => (
+                    <div key={idx} className={`rag-msg rag-msg-${msg.role}`}>
+                      <div className="rag-msg-role">{msg.role === "user" ? "You" : msg.role === "assistant" ? "Assistant" : msg.role}</div>
+                      <div className="rag-msg-content">{msg.content || (msg.role === "assistant" ? "..." : "")}</div>
+
+                      {/* Show retrieved chunks panel after the last assistant message */}
+                      {msg.role === "assistant" && idx === ragHistory.length - 1 && ragChunks.length > 0 && (
+                        <div className="rag-chunks-box">
+                          <button
+                            className="rag-chunks-toggle"
+                            onClick={() => setRagChunksExpanded((prev) => ({ ...prev, [idx]: !prev[idx] }))}
+                          >
+                            {ragChunksExpanded[idx] ? "Hide" : "Show"} Retrieved Chunks ({ragChunks.length})
+                          </button>
+                          {ragChunksExpanded[idx] && (
+                            <div className="rag-chunks-list">
+                              {ragToolCalls.length > 0 && (
+                                <div className="rag-tool-calls">
+                                  <strong>Tool calls:</strong>
+                                  {ragToolCalls.map((tc, ti) => (
+                                    <span key={ti} className="rag-tool-call-badge">
+                                      {tc.name}({Object.values(tc.arguments).join(", ")})
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                              <div className="dual-results-grid">
+                                <div className="results-panel">
+                                  <h4>Semantic Search</h4>
+                                  {ragChunks.filter((c) => c.search_type === "semantic").length === 0 ? (
+                                    <p className="hint">No semantic results.</p>
+                                  ) : (
+                                    ragChunks
+                                      .filter((c) => c.search_type === "semantic")
+                                      .map((c, ci) => (
+                                        <div key={ci} className="rag-chunk-card">
+                                          <div className="rag-chunk-meta">
+                                            <span className="badge badge-running">{c.entity}</span>
+                                            {c.distance != null && <span>dist: {c.distance.toFixed(4)}</span>}
+                                          </div>
+                                          <p className="rag-chunk-text">{c.document}</p>
+                                        </div>
+                                      ))
+                                  )}
+                                </div>
+                                <div className="results-panel">
+                                  <h4>Keyword Search</h4>
+                                  {ragChunks.filter((c) => c.search_type === "keyword").length === 0 ? (
+                                    <p className="hint">No keyword results.</p>
+                                  ) : (
+                                    ragChunks
+                                      .filter((c) => c.search_type === "keyword")
+                                      .map((c, ci) => (
+                                        <div key={ci} className="rag-chunk-card">
+                                          <div className="rag-chunk-meta">
+                                            <span className="badge badge-running">{c.entity}</span>
+                                          </div>
+                                          <p className="rag-chunk-text">{c.document}</p>
+                                        </div>
+                                      ))
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                  {ragLoading && (
+                    <div className="rag-msg rag-msg-assistant">
+                      <div className="rag-msg-role">Assistant</div>
+                      <div className="rag-msg-content rag-typing">Thinking...</div>
+                    </div>
+                  )}
+                  <div ref={ragChatEndRef} />
+                </div>
+
+                {/* Input area */}
+                <div className="rag-input-area">
+                  <input
+                    className="rag-input"
+                    type="text"
+                    placeholder="Ask about a person or place..."
+                    value={ragInput}
+                    onChange={(e) => setRagInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        sendRagMessage();
+                      }
+                    }}
+                    disabled={ragLoading}
+                  />
+                  <button onClick={sendRagMessage} disabled={!ragInput.trim() || ragLoading}>
+                    Send
+                  </button>
+                  <button className="button-secondary" onClick={clearRagChat}>
+                    Clear
+                  </button>
+                </div>
+              </div>
+            </section>
+          )}
         </div>
       </main>
     </div>
