@@ -23,7 +23,7 @@ A ChatGPT-style question-answering system that runs **entirely on localhost**. I
 - **ChromaDB**: Persistent local vector database as required. Uses cosine distance for HNSW index.
 - **Chunking strategy**: Fixed-size with overlap. Simple but effective for the document sizes involved (Wikipedia extracts are typically 1-5 KB). Overlap prevents information loss at chunk boundaries.
 - **Embedding model**: `nomic-embed-text` via Ollama — fully local, no API keys needed.
-- **LLM**: `qwen2.5:1.5b` — small enough to run on most laptops, supports tool/function calling via Ollama's chat API.
+- **LLM**: `qwen2.5:1.5b-instruct` — small enough to run on most laptops, supports tool/function calling via Ollama's chat API.
 - **MCP tool calls**: The LLM is given two tools in its system prompt. Ollama's native tool-calling support routes the call back to our retrieval functions. Retrieved chunks are shown in the UI.
 
 ---
@@ -39,7 +39,7 @@ A ChatGPT-style question-answering system that runs **entirely on localhost**. I
 ### 1. Pull required Ollama models
 
 ```bash
-ollama pull qwen2.5:1.5b
+ollama pull qwen2.5:1.5b-instruct
 ollama pull nomic-embed-text
 ```
 

@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from .chroma_store import collection_count, people_collection, places_collection
+from .chroma_store import collection_count, entity_chunk_count, people_collection, places_collection
 from .entities import PEOPLE, PLACES
 from .mcp_server import execute_tool
 from .ollama_client import chat, clear_session
@@ -54,11 +54,6 @@ class ChatResponse(BaseModel):
     history: list[ChatMessage]
 
 
-class IngestRequest(BaseModel):
-    chunk_size: int = 500
-    overlap: int = 50
-
-
 class IngestResult(BaseModel):
     entity: str
     category: str
@@ -77,12 +72,20 @@ class EntityListResponse(BaseModel):
     places: list[str]
 
 
+class EntityStatus(BaseModel):
+    name: str
+    category: str
+    chunks: int
+    ingested: bool
+
+
 class StatusResponse(BaseModel):
     people_chunks: int
     places_chunks: int
     total_chunks: int
     people_count: int
     places_count: int
+    entities: list[EntityStatus]
 
 
 class ClearResponse(BaseModel):
@@ -122,8 +125,9 @@ async def rag_chat(req: ChatRequest) -> ChatResponse:
         for tc in result.get("tool_calls", [])
     ]
     history = [
-        ChatMessage(role=m["role"], content=m.get("content", ""))
+        ChatMessage(role=m.get("role", "unknown"), content=str(m.get("content") or ""))
         for m in result.get("history", [])
+        if m.get("role") in ("user", "assistant")
     ]
     return ChatResponse(
         session_id=result["session_id"],
@@ -147,13 +151,11 @@ async def rag_entities() -> EntityListResponse:
 
 
 @rag_router.post("/ingest", response_model=IngestResponse)
-async def rag_ingest(req: IngestRequest) -> IngestResponse:
+async def rag_ingest() -> IngestResponse:
     from .wikipedia_ingest import ingest_all
 
     loop = asyncio.get_running_loop()
-    results = await loop.run_in_executor(
-        None, lambda: ingest_all(chunk_size=req.chunk_size, overlap=req.overlap)
-    )
+    results = await loop.run_in_executor(None, ingest_all)
     ok = sum(1 for r in results if r["status"] == "ok")
     total_chunks = sum(r["chunks"] for r in results)
     return IngestResponse(
@@ -165,12 +167,24 @@ async def rag_ingest(req: IngestRequest) -> IngestResponse:
 
 @rag_router.get("/status", response_model=StatusResponse)
 async def rag_status() -> StatusResponse:
-    pc = collection_count(people_collection())
-    lc = collection_count(places_collection())
+    p_col = people_collection()
+    l_col = places_collection()
+    pc = collection_count(p_col)
+    lc = collection_count(l_col)
+
+    entities: list[EntityStatus] = []
+    for name in PEOPLE:
+        n = entity_chunk_count(p_col, name)
+        entities.append(EntityStatus(name=name, category="person", chunks=n, ingested=n > 0))
+    for name in PLACES:
+        n = entity_chunk_count(l_col, name)
+        entities.append(EntityStatus(name=name, category="place", chunks=n, ingested=n > 0))
+
     return StatusResponse(
         people_chunks=pc,
         places_chunks=lc,
         total_chunks=pc + lc,
         people_count=len(PEOPLE),
         places_count=len(PLACES),
+        entities=entities,
     )

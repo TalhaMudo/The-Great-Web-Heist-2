@@ -120,12 +120,20 @@ type RagChatResponse = {
   history: RagChatMessage[];
 };
 
+type RagEntityStatus = {
+  name: string;
+  category: string;
+  chunks: number;
+  ingested: boolean;
+};
+
 type RagStatus = {
   people_chunks: number;
   places_chunks: number;
   total_chunks: number;
   people_count: number;
   places_count: number;
+  entities: RagEntityStatus[];
 };
 
 export const App: React.FC = () => {
@@ -163,8 +171,6 @@ export const App: React.FC = () => {
   const [ragLoading, setRagLoading] = useState(false);
   const [ragStatus, setRagStatus] = useState<RagStatus | null>(null);
   const [ragIngesting, setRagIngesting] = useState(false);
-  const [ragChunkSize, setRagChunkSize] = useState("500");
-  const [ragOverlap, setRagOverlap] = useState("50");
   const [ragChunksExpanded, setRagChunksExpanded] = useState<Record<number, boolean>>({});
   const ragChatEndRef = useRef<HTMLDivElement>(null);
 
@@ -478,14 +484,7 @@ export const App: React.FC = () => {
     setError(null);
     setRagIngesting(true);
     try {
-      const res = await fetch("/rag/ingest", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chunk_size: Number(ragChunkSize) || 500,
-          overlap: Number(ragOverlap) || 50,
-        }),
-      });
+      const res = await fetch("/rag/ingest", { method: "POST" });
       if (!res.ok) {
         const data = await res.json();
         throw new Error(data.detail ?? "Ingestion failed");
@@ -1070,19 +1069,40 @@ export const App: React.FC = () => {
                   <span>People chunks: <strong>{ragStatus?.people_chunks ?? 0}</strong></span>
                   <span>Places chunks: <strong>{ragStatus?.places_chunks ?? 0}</strong></span>
                   <span>Total: <strong>{ragStatus?.total_chunks ?? 0}</strong></span>
+                  <span>Ingested: <strong>{ragStatus?.entities.filter((e) => e.ingested).length ?? 0}</strong> / {ragStatus?.entities.length ?? 0}</span>
                 </div>
                 <div className="rag-ingest-controls">
-                  <label>Chunk size
-                    <input type="number" min={100} value={ragChunkSize} onChange={(e) => setRagChunkSize(e.target.value)} style={{ width: 70 }} />
-                  </label>
-                  <label>Overlap
-                    <input type="number" min={0} value={ragOverlap} onChange={(e) => setRagOverlap(e.target.value)} style={{ width: 60 }} />
-                  </label>
                   <button onClick={runRagIngest} disabled={ragIngesting}>
-                    {ragIngesting ? "Ingesting..." : "Ingest Wikipedia"}
+                    {ragIngesting ? "Ingesting Wikipedia..." : "Ingest Wikipedia"}
                   </button>
                 </div>
               </div>
+
+              {/* Entity list */}
+              {ragStatus && ragStatus.entities.length > 0 && (
+                <div className="rag-entity-list">
+                  <div className="rag-entity-group">
+                    <h4>People ({ragStatus.entities.filter((e) => e.category === "person" && e.ingested).length}/{ragStatus.entities.filter((e) => e.category === "person").length})</h4>
+                    <div className="rag-entity-tags">
+                      {ragStatus.entities.filter((e) => e.category === "person").map((ent) => (
+                        <span key={ent.name} className={`rag-entity-tag ${ent.ingested ? "rag-entity-ingested" : "rag-entity-pending"}`} title={ent.ingested ? `${ent.chunks} chunks` : "Not ingested"}>
+                          {ent.name} {ent.ingested && <small>({ent.chunks})</small>}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="rag-entity-group">
+                    <h4>Places ({ragStatus.entities.filter((e) => e.category === "place" && e.ingested).length}/{ragStatus.entities.filter((e) => e.category === "place").length})</h4>
+                    <div className="rag-entity-tags">
+                      {ragStatus.entities.filter((e) => e.category === "place").map((ent) => (
+                        <span key={ent.name} className={`rag-entity-tag ${ent.ingested ? "rag-entity-ingested" : "rag-entity-pending"}`} title={ent.ingested ? `${ent.chunks} chunks` : "Not ingested"}>
+                          {ent.name} {ent.ingested && <small>({ent.chunks})</small>}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* Chat messages */}
               <div className="rag-chat-container">

@@ -747,6 +747,61 @@ td a {
   color: #c7d2fe;
 }
 
+/* ───── Entity List ───── */
+
+.rag-entity-list {
+  margin-bottom: 0.75rem;
+  padding: 0.6rem 0.75rem;
+  border-radius: 0.6rem;
+  background: rgba(7, 12, 26, 0.45);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.rag-entity-group {
+  margin-bottom: 0.5rem;
+}
+
+.rag-entity-group:last-child {
+  margin-bottom: 0;
+}
+
+.rag-entity-group h4 {
+  margin: 0 0 0.3rem;
+  font-size: 0.8rem;
+  color: #a5b4fc;
+}
+
+.rag-entity-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.rag-entity-tag {
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
+.rag-entity-tag small {
+  opacity: 0.7;
+}
+
+.rag-entity-ingested {
+  background: rgba(22, 163, 74, 0.2);
+  color: #bbf7d0;
+  border: 1px solid rgba(22, 163, 74, 0.35);
+}
+
+.rag-entity-pending {
+  background: rgba(148, 163, 184, 0.12);
+  color: #94a3b8;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+}
+
 @media (max-width: 880px) {
   .app {
     padding: 0.75rem;

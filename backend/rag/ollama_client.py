@@ -94,17 +94,52 @@ def clear_session(session_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Helpers to normalise the ollama library's Message objects to dicts
+# ---------------------------------------------------------------------------
+
+def _msg_to_dict(msg: Any) -> dict[str, Any]:
+    """Convert an ollama Message (or already-a-dict) to a plain dict."""
+    if isinstance(msg, dict):
+        return msg
+    if hasattr(msg, "model_dump"):
+        return msg.model_dump()
+    return {"role": str(getattr(msg, "role", "assistant")),
+            "content": str(getattr(msg, "content", ""))}
+
+
+def _extract_tool_calls(msg: Any) -> list[dict[str, Any]]:
+    """Pull tool_calls from an ollama Message, normalise to list[dict]."""
+    raw = msg.get("tool_calls") if isinstance(msg, dict) else getattr(msg, "tool_calls", None)
+    if not raw:
+        return []
+    out: list[dict[str, Any]] = []
+    for tc in raw:
+        if isinstance(tc, dict):
+            out.append(tc)
+        else:
+            fn = getattr(tc, "function", None)
+            if fn is None:
+                continue
+            out.append({
+                "function": {
+                    "name": getattr(fn, "name", ""),
+                    "arguments": getattr(fn, "arguments", {}),
+                }
+            })
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Synchronous Ollama call (run in executor for async FastAPI)
 # ---------------------------------------------------------------------------
 
-def _chat_sync(messages: list[dict[str, Any]]) -> dict[str, Any]:
+def _chat_sync(messages: list[dict[str, Any]]) -> Any:
     """Blocking call to ollama.chat() -- mirrors the reference client."""
-    response = _ollama.chat(
+    return _ollama.chat(
         model=CHAT_MODEL,
         messages=messages,
         tools=TOOLS_SCHEMA,
     )
-    return response
 
 
 # ---------------------------------------------------------------------------
@@ -132,26 +167,24 @@ async def chat(
     for _round in range(max_tool_rounds + 1):
         response = await loop.run_in_executor(None, _chat_sync, list(history))
 
-        assistant_message = response.get("message") or response
-        if isinstance(assistant_message, dict):
-            pass
-        else:
-            assistant_message = {"role": "assistant", "content": str(assistant_message)}
-
-        tool_calls = assistant_message.get("tool_calls") or []
+        # response is a ChatResponse; response["message"] is a Message object
+        assistant_message = response["message"]
+        tool_calls = _extract_tool_calls(assistant_message)
 
         if not tool_calls:
-            answer = assistant_message.get("content", "")
+            content = assistant_message.get("content") if isinstance(assistant_message, dict) else getattr(assistant_message, "content", "")
+            answer = content or ""
             history.append({"role": "assistant", "content": answer})
             return {
                 "session_id": sid,
                 "answer": answer,
                 "tool_calls": all_tool_calls,
                 "chunks_retrieved": all_chunks,
-                "history": [m for m in history if m["role"] != "system"],
+                "history": [m for m in history if m.get("role") != "system"],
             }
 
-        history.append(assistant_message)
+        # Append the raw assistant message (with tool_calls) to history
+        history.append(_msg_to_dict(assistant_message))
 
         for tc in tool_calls:
             fn = tc.get("function", {})
@@ -183,5 +216,5 @@ async def chat(
         "answer": answer,
         "tool_calls": all_tool_calls,
         "chunks_retrieved": all_chunks,
-        "history": [m for m in history if m["role"] != "system"],
+        "history": [m for m in history if m.get("role") != "system"],
     }

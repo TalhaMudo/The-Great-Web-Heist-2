@@ -33,27 +33,22 @@ def _retrieve(
     query: str | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Run semantic + keyword search on a collection and return a
-    formatted text block plus the raw chunk list for the UI."""
+    formatted text block plus the raw chunk list for the UI.
+
+    First tries with an entity-name filter; if nothing is found, retries
+    without the filter so the model's slightly different spelling still works.
+    """
 
     col = collection_getter()
     search_text = f"{name} {query}" if query else name
 
-    # Semantic search
-    try:
-        query_emb = embed_single(search_text)
-        sem_results = semantic_search(
-            col, query_embedding=query_emb, top_k=TOP_K,
-            where={"entity": name} if name else None,
-        )
-    except Exception:
-        logger.warning("Semantic search failed for %s, falling back to keyword only", name)
-        sem_results = []
+    sem_results = _semantic(col, search_text, where={"entity": name})
+    kw_results = _keyword(col, search_text, where={"entity": name})
 
-    # Keyword search
-    kw_results = keyword_search(
-        col, query=search_text, top_k=TOP_K,
-        where={"entity": name} if name else None,
-    )
+    # If the exact entity filter found nothing, try unfiltered
+    if not sem_results and not kw_results:
+        sem_results = _semantic(col, search_text, where=None)
+        kw_results = _keyword(col, search_text, where=None)
 
     seen_ids: set[str] = set()
     merged: list[dict[str, Any]] = []
@@ -80,6 +75,19 @@ def _retrieve(
         lines.append("---")
 
     return "\n".join(lines), merged
+
+
+def _semantic(col, text: str, where) -> list[dict[str, Any]]:
+    try:
+        query_emb = embed_single(text)
+        return semantic_search(col, query_embedding=query_emb, top_k=TOP_K, where=where)
+    except Exception:
+        logger.warning("Semantic search failed for '%s'", text)
+        return []
+
+
+def _keyword(col, text: str, where) -> list[dict[str, Any]]:
+    return keyword_search(col, query=text, top_k=TOP_K, where=where)
 
 
 def get_info_person(name: str, query: str | None = None) -> tuple[str, list[dict[str, Any]]]:

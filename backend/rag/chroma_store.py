@@ -164,6 +164,15 @@ def collection_count(collection: chromadb.Collection) -> int:
         return 0
 
 
+def entity_chunk_count(collection: chromadb.Collection, entity_name: str) -> int:
+    """Count how many chunks exist for a specific entity."""
+    try:
+        results = collection.get(where={"entity": entity_name}, include=[])
+        return len(results.get("ids", []))
+    except Exception:
+        return 0
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
