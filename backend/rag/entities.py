@@ -53,6 +53,8 @@ PEOPLE: list[str] = [
     "Dante Alighieri",
     "Marco Polo",
     "Christopher Columbus",
+    "Neil Armstrong",
+    "Buzz Aldrin",
 ]
 
 PLACES: list[str] = [

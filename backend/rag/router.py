@@ -144,7 +144,7 @@ async def rag_chat(req: ChatRequest) -> ChatResponse:
     history = [
         ChatMessage(role=m.get("role", "unknown"), content=str(m.get("content") or ""))
         for m in result.get("history", [])
-        if m.get("role") in ("user", "assistant")
+        if m.get("role") in ("user", "assistant") and (m.get("role") != "assistant" or m.get("content"))
     ]
     return ChatResponse(
         session_id=result["session_id"],
@@ -179,6 +179,7 @@ async def rag_session_history(session_id: str) -> SessionHistoryResponse:
         history=[
             ChatMessage(role=m.get("role", "unknown"), content=str(m.get("content") or ""))
             for m in msgs
+            if m.get("role") != "assistant" or m.get("content")
         ],
     )
 
