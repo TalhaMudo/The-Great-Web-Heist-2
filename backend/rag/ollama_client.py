@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import uuid
+from dataclasses import dataclass
 from typing import Any
 
 import ollama as _ollama
@@ -19,13 +20,15 @@ logger = logging.getLogger(__name__)
 CHAT_MODEL = "qwen2.5:1.5b-instruct"
 
 SYSTEM_PROMPT = """\
-You are a helpful assistant that answers questions about famous people and places.
-You MUST use the provided tools to look up information before answering.
-- Use get_info_person when the question involves a person.
-- Use get_info_place when the question involves a place.
-- If the question involves both a person and a place, call both tools.
-- If the retrieved context does not contain enough information, say "I don't know based on the available data."
-- Always ground your answer in the retrieved context. Do not make up facts.
+You are a RAG assistant. You answer questions ONLY using information retrieved from the knowledge base tools.
+
+MANDATORY RULES:
+1. You MUST call at least one tool (get_info_person or get_info_place) for EVERY question. NEVER answer without calling a tool first.
+2. If the question mentions a person, call get_info_person. If it mentions a place, call get_info_place. If both, call both.
+3. If you are unsure whether the query is about a person or a place, call BOTH tools.
+4. After receiving the tool results, answer ONLY based on what the tool returned. Do NOT add any information from your own knowledge.
+5. If the tool returns "No information found", respond with: "I don't have information about that in my knowledge base."
+6. NEVER skip the tool call. NEVER answer from memory. Every answer must come from the tools.
 """
 
 TOOLS_SCHEMA: list[dict[str, Any]] = [
@@ -75,22 +78,71 @@ TOOLS_SCHEMA: list[dict[str, Any]] = [
 
 
 # ---------------------------------------------------------------------------
-# Session store (in-memory)
+# Session store (in-memory, with metadata)
 # ---------------------------------------------------------------------------
 
+@dataclass
+class SessionMeta:
+    title: str
+    created_at: str
+    updated_at: str
+
+
 _sessions: dict[str, list[dict[str, Any]]] = {}
+_session_meta: dict[str, SessionMeta] = {}
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
 
 
 def get_or_create_session(session_id: str | None = None) -> tuple[str, list[dict[str, Any]]]:
     if session_id and session_id in _sessions:
+        _session_meta[session_id].updated_at = _now_iso()
         return session_id, _sessions[session_id]
     sid = session_id or str(uuid.uuid4())
     _sessions[sid] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    _session_meta[sid] = SessionMeta(
+        title="New conversation",
+        created_at=_now_iso(),
+        updated_at=_now_iso(),
+    )
     return sid, _sessions[sid]
 
 
 def clear_session(session_id: str) -> None:
     _sessions.pop(session_id, None)
+    _session_meta.pop(session_id, None)
+
+
+def list_sessions() -> list[dict[str, Any]]:
+    """Return all sessions sorted by most recently updated."""
+    out: list[dict[str, Any]] = []
+    for sid, meta in _session_meta.items():
+        msgs = _sessions.get(sid, [])
+        msg_count = sum(1 for m in msgs if m.get("role") in ("user", "assistant"))
+        out.append({
+            "session_id": sid,
+            "title": meta.title,
+            "created_at": meta.created_at,
+            "updated_at": meta.updated_at,
+            "message_count": msg_count,
+        })
+    out.sort(key=lambda s: s["updated_at"], reverse=True)
+    return out
+
+
+def get_session_history(session_id: str) -> list[dict[str, Any]] | None:
+    msgs = _sessions.get(session_id)
+    if msgs is None:
+        return None
+    return [m for m in msgs if m.get("role") in ("user", "assistant")]
+
+
+def update_session_title(session_id: str, title: str) -> None:
+    if session_id in _session_meta:
+        _session_meta[session_id].title = title
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +211,11 @@ async def chat(
     """
     sid, history = get_or_create_session(session_id)
     history.append({"role": "user", "content": user_message})
+
+    # Auto-title from first user message
+    user_msgs = [m for m in history if m.get("role") == "user"]
+    if len(user_msgs) == 1 and sid in _session_meta:
+        _session_meta[sid].title = user_message[:60] + ("..." if len(user_message) > 60 else "")
 
     all_tool_calls: list[dict[str, Any]] = []
     all_chunks: list[dict[str, Any]] = []

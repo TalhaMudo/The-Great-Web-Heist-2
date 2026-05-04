@@ -127,6 +127,14 @@ type RagEntityStatus = {
   ingested: boolean;
 };
 
+type RagSessionInfo = {
+  session_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  message_count: number;
+};
+
 type RagStatus = {
   people_chunks: number;
   places_chunks: number;
@@ -172,6 +180,8 @@ export const App: React.FC = () => {
   const [ragStatus, setRagStatus] = useState<RagStatus | null>(null);
   const [ragIngesting, setRagIngesting] = useState(false);
   const [ragChunksExpanded, setRagChunksExpanded] = useState<Record<number, boolean>>({});
+  const [ragSessions, setRagSessions] = useState<RagSessionInfo[]>([]);
+  const [ragEntitiesOpen, setRagEntitiesOpen] = useState(false);
   const ragChatEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -433,6 +443,20 @@ export const App: React.FC = () => {
     return () => clearInterval(interval);
   }, [viewMode]);
 
+  // RAG session list polling
+  useEffect(() => {
+    if (viewMode !== "rag") return;
+    const fetchSessions = () => {
+      fetch("/rag/sessions")
+        .then((res) => res.json())
+        .then((data: { sessions: RagSessionInfo[] }) => setRagSessions(data.sessions))
+        .catch(() => {});
+    };
+    fetchSessions();
+    const interval = setInterval(fetchSessions, 3000);
+    return () => clearInterval(interval);
+  }, [viewMode]);
+
   // Auto-scroll chat
   useEffect(() => {
     ragChatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -469,15 +493,34 @@ export const App: React.FC = () => {
     }
   };
 
-  const clearRagChat = async () => {
-    if (ragSessionId) {
-      await fetch(`/rag/chat/clear?session_id=${ragSessionId}`, { method: "POST" }).catch(() => {});
-    }
+  const newRagChat = () => {
     setRagSessionId(null);
     setRagHistory([]);
     setRagChunks([]);
     setRagToolCalls([]);
     setRagChunksExpanded({});
+  };
+
+  const deleteRagChat = async (sid: string) => {
+    await fetch(`/rag/chat/clear?session_id=${sid}`, { method: "POST" }).catch(() => {});
+    if (ragSessionId === sid) newRagChat();
+    setRagSessions((prev) => prev.filter((s) => s.session_id !== sid));
+  };
+
+  const loadRagSession = async (sid: string) => {
+    if (sid === ragSessionId) return;
+    setRagChunks([]);
+    setRagToolCalls([]);
+    setRagChunksExpanded({});
+    try {
+      const res = await fetch(`/rag/sessions/${sid}`);
+      if (!res.ok) return;
+      const data: { session_id: string; history: RagChatMessage[] } = await res.json();
+      setRagSessionId(data.session_id);
+      setRagHistory(data.history);
+    } catch {
+      // ignore
+    }
   };
 
   const runRagIngest = async () => {
@@ -1056,56 +1099,75 @@ export const App: React.FC = () => {
           {viewMode === "embeddings" && embeddingsPanel}
 
           {viewMode === "rag" && (
-            <section className="panel rag-panel">
-              <h2>RAG Chat</h2>
-              <p className="search-subtitle">
-                Ask questions about famous people and places. The local Qwen2.5-1.5B model will
-                use MCP tool calls to retrieve relevant chunks from ChromaDB before answering.
-              </p>
-
-              {/* Ingestion & status bar */}
-              <div className="rag-status-bar">
-                <div className="rag-status-info">
-                  <span>People chunks: <strong>{ragStatus?.people_chunks ?? 0}</strong></span>
-                  <span>Places chunks: <strong>{ragStatus?.places_chunks ?? 0}</strong></span>
-                  <span>Total: <strong>{ragStatus?.total_chunks ?? 0}</strong></span>
-                  <span>Ingested: <strong>{ragStatus?.entities.filter((e) => e.ingested).length ?? 0}</strong> / {ragStatus?.entities.length ?? 0}</span>
+            <div className="rag-layout">
+              {/* Session sidebar */}
+              <aside className="rag-sidebar">
+                <button className="rag-new-chat-btn" onClick={newRagChat}>+ New Chat</button>
+                <div className="rag-session-list">
+                  {ragSessions.length === 0 && (
+                    <p className="hint" style={{ padding: "0.5rem" }}>No conversations yet.</p>
+                  )}
+                  {ragSessions.map((s) => (
+                    <div
+                      key={s.session_id}
+                      className={`rag-session-item ${ragSessionId === s.session_id ? "rag-session-active" : ""}`}
+                      onClick={() => loadRagSession(s.session_id)}
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(e) => { if (e.key === "Enter") loadRagSession(s.session_id); }}
+                    >
+                      <div className="rag-session-title">{s.title}</div>
+                      <div className="rag-session-meta">
+                        <span>{s.message_count} msgs</span>
+                        <button
+                          className="rag-session-delete"
+                          title="Delete"
+                          onClick={(e) => { e.stopPropagation(); deleteRagChat(s.session_id); }}
+                        >×</button>
+                      </div>
+                    </div>
+                  ))}
                 </div>
-                <div className="rag-ingest-controls">
-                  <button onClick={runRagIngest} disabled={ragIngesting}>
-                    {ragIngesting ? "Ingesting Wikipedia..." : "Ingest Wikipedia"}
+
+                {/* Ingestion status */}
+                <div className="rag-sidebar-status">
+                  <div className="rag-status-info-compact">
+                    <span>People: <strong>{ragStatus?.people_chunks ?? 0}</strong></span>
+                    <span>Places: <strong>{ragStatus?.places_chunks ?? 0}</strong></span>
+                    <span>Ingested: <strong>{ragStatus?.entities.filter((e) => e.ingested).length ?? 0}</strong>/{ragStatus?.entities.length ?? 0}</span>
+                  </div>
+                  <button className="rag-entities-toggle" onClick={() => setRagEntitiesOpen((v) => !v)}>
+                    {ragEntitiesOpen ? "▾ Hide entities" : "▸ Show entities"}
+                  </button>
+                  {ragEntitiesOpen && ragStatus && (
+                    <div className="rag-entities-compact">
+                      <div className="rag-entity-group-compact">
+                        <div className="rag-entity-group-label">People ({ragStatus.entities.filter((e) => e.category === "person" && e.ingested).length}/{ragStatus.entities.filter((e) => e.category === "person").length})</div>
+                        {ragStatus.entities.filter((e) => e.category === "person").map((ent) => (
+                          <span key={ent.name} className={`rag-entity-tag-sm ${ent.ingested ? "rag-entity-ingested" : "rag-entity-pending"}`}>
+                            {ent.name}{ent.ingested ? ` (${ent.chunks})` : ""}
+                          </span>
+                        ))}
+                      </div>
+                      <div className="rag-entity-group-compact">
+                        <div className="rag-entity-group-label">Places ({ragStatus.entities.filter((e) => e.category === "place" && e.ingested).length}/{ragStatus.entities.filter((e) => e.category === "place").length})</div>
+                        {ragStatus.entities.filter((e) => e.category === "place").map((ent) => (
+                          <span key={ent.name} className={`rag-entity-tag-sm ${ent.ingested ? "rag-entity-ingested" : "rag-entity-pending"}`}>
+                            {ent.name}{ent.ingested ? ` (${ent.chunks})` : ""}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  <button className="rag-ingest-btn" onClick={runRagIngest} disabled={ragIngesting}>
+                    {ragIngesting ? "Ingesting..." : "Ingest Wikipedia"}
                   </button>
                 </div>
-              </div>
+              </aside>
 
-              {/* Entity list */}
-              {ragStatus && ragStatus.entities.length > 0 && (
-                <div className="rag-entity-list">
-                  <div className="rag-entity-group">
-                    <h4>People ({ragStatus.entities.filter((e) => e.category === "person" && e.ingested).length}/{ragStatus.entities.filter((e) => e.category === "person").length})</h4>
-                    <div className="rag-entity-tags">
-                      {ragStatus.entities.filter((e) => e.category === "person").map((ent) => (
-                        <span key={ent.name} className={`rag-entity-tag ${ent.ingested ? "rag-entity-ingested" : "rag-entity-pending"}`} title={ent.ingested ? `${ent.chunks} chunks` : "Not ingested"}>
-                          {ent.name} {ent.ingested && <small>({ent.chunks})</small>}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="rag-entity-group">
-                    <h4>Places ({ragStatus.entities.filter((e) => e.category === "place" && e.ingested).length}/{ragStatus.entities.filter((e) => e.category === "place").length})</h4>
-                    <div className="rag-entity-tags">
-                      {ragStatus.entities.filter((e) => e.category === "place").map((ent) => (
-                        <span key={ent.name} className={`rag-entity-tag ${ent.ingested ? "rag-entity-ingested" : "rag-entity-pending"}`} title={ent.ingested ? `${ent.chunks} chunks` : "Not ingested"}>
-                          {ent.name} {ent.ingested && <small>({ent.chunks})</small>}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Chat messages */}
-              <div className="rag-chat-container">
+              {/* Main chat area */}
+              <section className="panel rag-panel">
+                <div className="rag-chat-container">
                 <div className="rag-chat-messages">
                   {ragHistory.length === 0 && (
                     <p className="hint" style={{ textAlign: "center", marginTop: 40 }}>
@@ -1209,12 +1271,13 @@ export const App: React.FC = () => {
                   <button onClick={sendRagMessage} disabled={!ragInput.trim() || ragLoading}>
                     Send
                   </button>
-                  <button className="button-secondary" onClick={clearRagChat}>
-                    Clear
+                  <button className="button-secondary" onClick={newRagChat}>
+                    New Chat
                   </button>
                 </div>
               </div>
             </section>
+            </div>
           )}
         </div>
       </main>

@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from .chroma_store import collection_count, entity_chunk_count, people_collection, places_collection
 from .entities import PEOPLE, PLACES
 from .mcp_server import execute_tool
-from .ollama_client import chat, clear_session
+from .ollama_client import chat, clear_session, get_session_history, list_sessions
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +92,23 @@ class ClearResponse(BaseModel):
     cleared: bool
 
 
+class SessionInfo(BaseModel):
+    session_id: str
+    title: str
+    created_at: str
+    updated_at: str
+    message_count: int
+
+
+class SessionListResponse(BaseModel):
+    sessions: list[SessionInfo]
+
+
+class SessionHistoryResponse(BaseModel):
+    session_id: str
+    history: list[ChatMessage]
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -143,6 +160,27 @@ async def rag_clear(session_id: str | None = None) -> ClearResponse:
     if session_id:
         clear_session(session_id)
     return ClearResponse(cleared=True)
+
+
+@rag_router.get("/sessions", response_model=SessionListResponse)
+async def rag_sessions() -> SessionListResponse:
+    return SessionListResponse(
+        sessions=[SessionInfo(**s) for s in list_sessions()]
+    )
+
+
+@rag_router.get("/sessions/{session_id}", response_model=SessionHistoryResponse)
+async def rag_session_history(session_id: str) -> SessionHistoryResponse:
+    msgs = get_session_history(session_id)
+    if msgs is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return SessionHistoryResponse(
+        session_id=session_id,
+        history=[
+            ChatMessage(role=m.get("role", "unknown"), content=str(m.get("content") or ""))
+            for m in msgs
+        ],
+    )
 
 
 @rag_router.get("/entities", response_model=EntityListResponse)
